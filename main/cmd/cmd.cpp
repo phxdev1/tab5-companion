@@ -339,6 +339,7 @@ static void cmd_kv_set(cJSON *root)
     cJSON *val = cJSON_GetObjectItem(root, "value");
     if (!val) { respond_error("missing 'value'"); return; }
     char *val_str = cJSON_PrintUnformatted(val);
+    ESP_LOGI("kv", "set key=%s type=%d raw=%s", key, val->type, val_str);
     cJSON *ttl_item = cJSON_GetObjectItem(root, "ttl");
     uint32_t ttl = ttl_item ? (uint32_t)ttl_item->valueint : 0;
     kv::set(key, val_str, ttl);
