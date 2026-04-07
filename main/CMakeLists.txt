@@ -4,6 +4,7 @@ idf_component_register(
          "hal/ble.cpp"
          "hal/touch.cpp"
          "hal/audio.cpp"
+         "hal/usb_host.cpp"
          "hal/wifi.cpp"
          "hal/http.cpp"
          "hal/kvstore.cpp"

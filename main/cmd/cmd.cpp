@@ -261,6 +261,67 @@ static void cmd_audio_volume(cJSON *root)
     respond_ok();
 }
 
+// ========== USB HOST COMMANDS ==========
+
+static void cmd_usb_list(cJSON *root)
+{
+    char *buf = (char *)malloc(2048);
+    if (!buf) { respond_error("no memory"); return; }
+    hal::usb_list_json(buf, 2048);
+    respond_json(buf);
+    free(buf);
+}
+
+static void cmd_usb_info(cJSON *root)
+{
+    cJSON *addr_item = cJSON_GetObjectItem(root, "addr");
+    if (!addr_item) { respond_error("missing 'addr'"); return; }
+    char *buf = (char *)malloc(2048);
+    if (!buf) { respond_error("no memory"); return; }
+    hal::usb_info_json((uint8_t)addr_item->valueint, buf, 2048);
+    respond_json(buf);
+    free(buf);
+}
+
+static void cmd_usb_control(cJSON *root)
+{
+    cJSON *addr_item = cJSON_GetObjectItem(root, "addr");
+    cJSON *rt_item = cJSON_GetObjectItem(root, "bmRequestType");
+    cJSON *req_item = cJSON_GetObjectItem(root, "bRequest");
+    if (!addr_item || !rt_item || !req_item) {
+        respond_error("missing addr, bmRequestType, or bRequest");
+        return;
+    }
+
+    uint8_t addr = (uint8_t)addr_item->valueint;
+    uint8_t bmRT = (uint8_t)rt_item->valueint;
+    uint8_t bReq = (uint8_t)req_item->valueint;
+    uint16_t wVal = cJSON_GetObjectItem(root, "wValue") ? (uint16_t)cJSON_GetObjectItem(root, "wValue")->valueint : 0;
+    uint16_t wIdx = cJSON_GetObjectItem(root, "wIndex") ? (uint16_t)cJSON_GetObjectItem(root, "wIndex")->valueint : 0;
+    uint16_t wLen = cJSON_GetObjectItem(root, "wLength") ? (uint16_t)cJSON_GetObjectItem(root, "wLength")->valueint : 0;
+
+    // For OUT transfers, parse data array
+    uint8_t *data = NULL;
+    cJSON *data_arr = cJSON_GetObjectItem(root, "data");
+    if (data_arr && cJSON_IsArray(data_arr) && cJSON_GetArraySize(data_arr) > 0) {
+        int n = cJSON_GetArraySize(data_arr);
+        data = (uint8_t *)malloc(n);
+        for (int i = 0; i < n; i++) {
+            data[i] = (uint8_t)cJSON_GetArrayItem(data_arr, i)->valueint;
+        }
+        if (wLen == 0) wLen = (uint16_t)n;
+    }
+
+    char *buf = (char *)malloc(2048);
+    if (!buf) { free(data); respond_error("no memory"); return; }
+
+    hal::usb_control_transfer(addr, bmRT, bReq, wVal, wIdx, data, wLen, buf, 2048);
+    respond_json(buf);
+
+    free(buf);
+    free(data);
+}
+
 // ========== WIFI COMMANDS ==========
 
 static void wifi_scan_task(void *arg)
@@ -476,6 +537,10 @@ static void on_command(const char *json, size_t len)
     // Audio
     else if (strcmp(cmd, "audio.tone") == 0)           cmd_audio_tone(root);
     else if (strcmp(cmd, "audio.volume") == 0)         cmd_audio_volume(root);
+    // USB Host
+    else if (strcmp(cmd, "usb.list") == 0)              cmd_usb_list(root);
+    else if (strcmp(cmd, "usb.info") == 0)              cmd_usb_info(root);
+    else if (strcmp(cmd, "usb.control") == 0)           cmd_usb_control(root);
     // Wi-Fi
     else if (strcmp(cmd, "wifi.scan") == 0)             cmd_wifi_scan(root);
     else if (strcmp(cmd, "wifi.connect") == 0)          cmd_wifi_connect(root);

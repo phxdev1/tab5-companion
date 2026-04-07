@@ -38,6 +38,9 @@ extern "C" void app_main(void)
     // Audio
     hal::audio_init();
 
+    // USB Host
+    hal::usb_init();
+
     // BLE — power C6, init NimBLE, start advertising
     hal::ble_init();
 

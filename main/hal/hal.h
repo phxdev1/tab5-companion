@@ -33,6 +33,14 @@ void audio_init();
 void audio_tone(int freq_hz, int duration_ms);
 void audio_set_volume(int pct);
 
+// --- USB Host ---
+void usb_init();
+int usb_list_json(char *buf, size_t len);       // List connected devices
+int usb_info_json(uint8_t addr, char *buf, size_t len);  // Device descriptors
+int usb_control_transfer(uint8_t addr, uint8_t bmRequestType, uint8_t bRequest,
+                         uint16_t wValue, uint16_t wIndex, uint8_t *data, uint16_t wLength,
+                         char *resp_buf, size_t resp_len);
+
 // --- Wi-Fi ---
 void wifi_init();
 bool wifi_connect(const char *ssid, const char *password);
