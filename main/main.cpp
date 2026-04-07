@@ -27,6 +27,12 @@ extern "C" void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(100));
     hal::display_set_brightness(20);
 
+    // Touch
+    hal::touch_init();
+
+    // Audio
+    hal::audio_init();
+
     // BLE — power C6, init NimBLE, start advertising
     hal::ble_init();
 
