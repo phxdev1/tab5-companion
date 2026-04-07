@@ -211,16 +211,20 @@ static void cmd_display_progress(cJSON *root)
 static void on_touch_event(int x, int y, int type)
 {
     const char *types[] = {"press", "release", "move"};
-    char buf[128];
-    snprintf(buf, sizeof(buf),
-        "{\"type\":\"touch\",\"x\":%d,\"y\":%d,\"action\":\"%s\",\"t\":%lld}",
-        x, y, types[type], (long long)(esp_timer_get_time() / 1000));
-    events::push(buf);
 
-    // Also update KV with last touch state
+    // Only queue press/release events — moves flood the buffer
+    if (type == 0 || type == 1) {
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+            "{\"type\":\"touch\",\"x\":%d,\"y\":%d,\"action\":\"%s\",\"t\":%lld}",
+            x, y, types[type], (long long)(esp_timer_get_time() / 1000));
+        events::push(buf);
+    }
+
+    // KV always gets latest position (including moves)
     char kv_buf[64];
     snprintf(kv_buf, sizeof(kv_buf), "{\"x\":%d,\"y\":%d,\"action\":\"%s\"}", x, y, types[type]);
-    kv::set("touch.last", kv_buf, 30); // expires in 30s
+    kv::set("touch.last", kv_buf, 30);
 }
 
 static void cmd_touch_enable(cJSON *root)
@@ -364,10 +368,13 @@ static void cmd_kv_list(cJSON *root)
 static void cmd_events_read(cJSON *root)
 {
     cJSON *limit_item = cJSON_GetObjectItem(root, "limit");
-    int limit = limit_item ? limit_item->valueint : 64;
-    char *buf = (char *)malloc(8192);
+    int limit = limit_item ? limit_item->valueint : 5; // Default 5 to fit in BLE MTU
+    if (limit > 50) limit = 50;
+    // ~100 bytes per event, leave room for framing
+    size_t buf_size = (size_t)limit * 120 + 64;
+    char *buf = (char *)malloc(buf_size);
     if (!buf) { respond_error("no memory"); return; }
-    events::read_json(buf, 8192, limit);
+    events::read_json(buf, buf_size, limit);
     respond_json(buf);
     free(buf);
 }
@@ -380,8 +387,8 @@ static void cmd_events_clear(cJSON *root)
 
 static void cmd_events_count(cJSON *root)
 {
-    char buf[64];
-    snprintf(buf, sizeof(buf), "{\"ok\":true,\"count\":%d}", events::count());
+    char buf[128];
+    snprintf(buf, sizeof(buf), "{\"ok\":true,\"count\":%d,\"note\":\"use events.read to drain\"}", events::count());
     respond_json(buf);
 }
 

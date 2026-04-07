@@ -188,7 +188,25 @@ bool hal::ble_is_connected() { return connected_; }
 void hal::ble_notify(const char *json)
 {
     if (!connected_) return;
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(json, strlen(json));
+
+    size_t len = strlen(json);
+    uint16_t mtu = ble_att_mtu(conn_handle_);
+    uint16_t max_payload = mtu > 3 ? mtu - 3 : 20; // ATT header overhead
+
+    if (len > max_payload) {
+        // Truncate with indicator — agent should use smaller limits
+        char *trunc = (char *)malloc(max_payload + 1);
+        if (!trunc) return;
+        memcpy(trunc, json, max_payload - 15);
+        snprintf(trunc + max_payload - 15, 16, "..TRUNCATED\"}");
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(trunc, strlen(trunc));
+        if (om) ble_gatts_notify_custom(conn_handle_, resp_chr_handle_, om);
+        free(trunc);
+        ESP_LOGW(TAG, "Notify truncated: %zu > MTU %d", len, max_payload);
+        return;
+    }
+
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(json, len);
     if (om) {
         int rc = ble_gatts_notify_custom(conn_handle_, resp_chr_handle_, om);
         if (rc != 0) ESP_LOGW(TAG, "Notify failed: %d", rc);
