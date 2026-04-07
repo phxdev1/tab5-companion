@@ -1,222 +1,29 @@
+// Wi-Fi HAL — BLOCKED until C6 coprocessor is flashed with esp_hosted v2 slave firmware.
+// The factory C6 runs esp_hosted v1 which is incompatible with the v2 host.
+// Requires USB-TTL adapter to flash C6 download pads on PCB.
+
 #include "hal/hal.h"
-#include "bsp/m5stack_tab5.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
-#include "esp_netif.h"
 #include "esp_log.h"
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <freertos/event_groups.h>
-#include <cstring>
 #include <cstdio>
 
 static const char *TAG = "hal:wifi";
 
-#define WIFI_CONNECTED_BIT BIT0
-#define WIFI_FAIL_BIT      BIT1
-
-static EventGroupHandle_t s_event_group = nullptr;
-static esp_netif_t *s_netif = nullptr;
-static bool s_connected = false;
-static bool s_initialized = false;
-static int s_retry_count = 0;
-
-static void wifi_event_handler(void *arg, esp_event_base_t base,
-                               int32_t id, void *data)
-{
-    if (base == WIFI_EVENT) {
-        if (id == WIFI_EVENT_STA_DISCONNECTED) {
-            s_connected = false;
-            if (s_retry_count < 5) {
-                s_retry_count++;
-                ESP_LOGI(TAG, "Reconnecting (%d/5)...", s_retry_count);
-                esp_wifi_connect();
-            } else {
-                xEventGroupSetBits(s_event_group, WIFI_FAIL_BIT);
-            }
-        }
-    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
-        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        s_connected = true;
-        s_retry_count = 0;
-        xEventGroupSetBits(s_event_group, WIFI_CONNECTED_BIT);
-    }
-}
-
 void hal::wifi_init()
 {
-    if (s_initialized) return;
-
-    s_event_group = xEventGroupCreate();
-
-    ESP_ERROR_CHECK(esp_netif_init());
-    esp_err_t ret = esp_event_loop_create_default();
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_ERROR_CHECK(ret);
-    }
-
-    s_netif = esp_netif_create_default_wifi_sta();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL);
-    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL);
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    s_initialized = true;
-    ESP_LOGI(TAG, "Wi-Fi initialized");
-}
-
-// --- Async connect ---
-
-struct wifi_connect_args_t {
-    char ssid[33];
-    char password[65];
-};
-
-static void wifi_connect_task(void *arg)
-{
-    wifi_connect_args_t *args = (wifi_connect_args_t *)arg;
-
-    s_retry_count = 0;
-
-    wifi_config_t wifi_cfg = {};
-    strncpy((char *)wifi_cfg.sta.ssid, args->ssid, sizeof(wifi_cfg.sta.ssid) - 1);
-    if (strlen(args->password) > 0) {
-        strncpy((char *)wifi_cfg.sta.password, args->password, sizeof(wifi_cfg.sta.password) - 1);
-        wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-    }
-    wifi_cfg.sta.pmf_cfg.capable = true;
-
-    esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
-    xEventGroupClearBits(s_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
-
-    ESP_LOGI(TAG, "Connecting to '%s'...", args->ssid);
-    esp_wifi_connect();
-
-    // Wait up to 15s — this blocks THIS task, not the BLE task
-    EventBits_t bits = xEventGroupWaitBits(s_event_group,
-        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE,
-        pdMS_TO_TICKS(15000));
-
-    if (bits & WIFI_CONNECTED_BIT) {
-        char ip[20] = {};
-        hal::wifi_get_ip(ip, sizeof(ip));
-
-        // Start HTTP server
-        hal::http_start(8080);
-
-        char buf[256];
-        snprintf(buf, sizeof(buf),
-            "{\"event\":\"wifi\",\"status\":\"connected\",\"ssid\":\"%s\",\"ip\":\"%s\"}",
-            args->ssid, ip);
-        hal::ble_notify(buf);
-        ESP_LOGI(TAG, "Connected to '%s' at %s", args->ssid, ip);
-    } else {
-        char buf[128];
-        snprintf(buf, sizeof(buf),
-            "{\"event\":\"wifi\",\"status\":\"failed\",\"ssid\":\"%s\"}",
-            args->ssid);
-        hal::ble_notify(buf);
-        ESP_LOGE(TAG, "Failed to connect to '%s'", args->ssid);
-    }
-
-    free(args);
-    vTaskDelete(NULL);
+    ESP_LOGW(TAG, "Wi-Fi disabled — C6 needs esp_hosted v2 slave firmware (USB-TTL flash required)");
 }
 
 bool hal::wifi_connect(const char *ssid, const char *password)
 {
-    if (!s_initialized) {
-        ESP_LOGE(TAG, "Wi-Fi not initialized");
-        return false;
-    }
-
-    // Allocate args for the task (freed inside task)
-    wifi_connect_args_t *args = (wifi_connect_args_t *)malloc(sizeof(wifi_connect_args_t));
-    if (!args) return false;
-
-    memset(args, 0, sizeof(*args));
-    strncpy(args->ssid, ssid, sizeof(args->ssid) - 1);
-    if (password) strncpy(args->password, password, sizeof(args->password) - 1);
-
-    // Launch connection on a separate task so BLE isn't blocked
-    xTaskCreate(wifi_connect_task, "wifi_conn", 4096, args, 3, NULL);
-    return true;  // Returns immediately; result comes via BLE notify
+    ESP_LOGE(TAG, "Wi-Fi blocked — C6 firmware upgrade required");
+    return false;
 }
 
-bool hal::wifi_is_connected()
-{
-    return s_connected;
-}
-
-void hal::wifi_get_ip(char *buf, size_t len)
-{
-    if (!s_connected || !s_netif) {
-        snprintf(buf, len, "0.0.0.0");
-        return;
-    }
-
-    esp_netif_ip_info_t ip_info;
-    if (esp_netif_get_ip_info(s_netif, &ip_info) == ESP_OK) {
-        snprintf(buf, len, IPSTR, IP2STR(&ip_info.ip));
-    } else {
-        snprintf(buf, len, "0.0.0.0");
-    }
-}
-
-int hal::wifi_get_rssi()
-{
-    if (!s_connected) return 0;
-    wifi_ap_record_t ap;
-    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) return ap.rssi;
-    return 0;
-}
-
+bool hal::wifi_is_connected() { return false; }
+void hal::wifi_get_ip(char *buf, size_t len) { snprintf(buf, len, "0.0.0.0"); }
+int hal::wifi_get_rssi() { return 0; }
 int hal::wifi_scan_json(char *buf, size_t len)
 {
-    if (!s_initialized) {
-        snprintf(buf, len, "{\"error\":\"wifi not initialized\"}");
-        return -1;
-    }
-
-    wifi_scan_config_t scan_cfg = {};
-    scan_cfg.scan_type = WIFI_SCAN_TYPE_ACTIVE;
-    scan_cfg.scan_time.active.min = 100;
-    scan_cfg.scan_time.active.max = 300;
-
-    esp_err_t ret = esp_wifi_scan_start(&scan_cfg, true);
-    if (ret != ESP_OK) {
-        snprintf(buf, len, "{\"error\":\"scan failed\"}");
-        return -1;
-    }
-
-    uint16_t ap_count = 0;
-    esp_wifi_scan_get_ap_num(&ap_count);
-
-    uint16_t max_aps = ap_count < 20 ? ap_count : 20;
-    wifi_ap_record_t *records = (wifi_ap_record_t *)malloc(sizeof(wifi_ap_record_t) * max_aps);
-    if (!records) {
-        snprintf(buf, len, "{\"error\":\"no memory\"}");
-        return -1;
-    }
-
-    esp_wifi_scan_get_ap_records(&max_aps, records);
-
-    int pos = snprintf(buf, len, "{\"ok\":true,\"count\":%d,\"aps\":[", max_aps);
-    for (int i = 0; i < max_aps && pos < (int)len - 100; i++) {
-        if (i > 0) pos += snprintf(buf + pos, len - pos, ",");
-        pos += snprintf(buf + pos, len - pos,
-            "{\"ssid\":\"%s\",\"rssi\":%d,\"ch\":%d,\"auth\":%d}",
-            (char *)records[i].ssid, records[i].rssi,
-            records[i].primary, records[i].authmode);
-    }
-    pos += snprintf(buf + pos, len - pos, "]}");
-
-    free(records);
-    return max_aps;
+    snprintf(buf, len, "{\"error\":\"wifi blocked: C6 coprocessor needs esp_hosted v2 slave firmware. Flash via USB-TTL adapter.\"}");
+    return -1;
 }

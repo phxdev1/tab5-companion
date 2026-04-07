@@ -1,4 +1,4 @@
-// BLE GATT server for Tab5 — NimBLE via esp_hosted C6 coprocessor
+// BLE GATT server for Tab5 — NimBLE via esp_hosted v2 C6 coprocessor
 
 #include "hal/hal.h"
 #include "bsp/m5stack_tab5.h"
@@ -10,7 +10,6 @@
 
 extern "C" {
 #include "esp_hosted.h"
-#include "esp_hosted_misc.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
@@ -46,28 +45,21 @@ static int cmd_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                           struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
-
     uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
     if (len == 0 || len > 4096) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-
     char *buf = (char *)malloc(len + 1);
     if (!buf) return BLE_ATT_ERR_INSUFFICIENT_RES;
-
     ble_hs_mbuf_to_flat(ctxt->om, buf, len, NULL);
     buf[len] = '\0';
-
     ESP_LOGI(TAG, "Command received (%d bytes)", len);
     if (cmd_handler_) cmd_handler_(buf, len);
-
     free(buf);
     return 0;
 }
 
 static int resp_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                            struct ble_gatt_access_ctxt *ctxt, void *arg)
-{
-    return 0;
-}
+{ return 0; }
 
 static int status_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                              struct ble_gatt_access_ctxt *ctxt, void *arg)
@@ -96,24 +88,19 @@ static struct ble_gatt_svc_def svcs[] = {
     { 0 },
 };
 
-// --- GAP ---
-
 static void start_advertising(void)
 {
     struct ble_hs_adv_fields fields = {};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.tx_pwr_lvl_is_present = 1;
     fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
-
     const char *name = ble_svc_gap_device_name();
     fields.name = (uint8_t *)name;
     fields.name_len = strlen(name);
     fields.name_is_complete = 1;
-
     fields.uuids16 = &svc_uuid;
     fields.num_uuids16 = 1;
     fields.uuids16_is_complete = 1;
-
     ble_gap_adv_set_fields(&fields);
 
     struct ble_gap_adv_params adv_params = {};
@@ -122,33 +109,14 @@ static void start_advertising(void)
 
     uint8_t own_addr_type;
     ble_hs_id_infer_auto(0, &own_addr_type);
-
     ESP_LOGI(TAG, "Advertising as '%s' (addr_type=%d)", name, own_addr_type);
-    ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER,
-                      &adv_params, gap_event, NULL);
+    ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER, &adv_params, gap_event, NULL);
 }
 
 static void on_sync(void)
 {
-    ESP_LOGI(TAG, "NimBLE sync — configuring address...");
-
-    // Generate a random static address if no public address available
-    int rc = ble_hs_util_ensure_addr(BLE_OWN_ADDR_RANDOM);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "ble_hs_util_ensure_addr failed: %d", rc);
-        return;
-    }
-
-    // Use random address for advertising
-    uint8_t own_addr_type;
-    rc = ble_hs_id_infer_auto(0, &own_addr_type);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "ble_hs_id_infer_auto failed: %d", rc);
-        // Fall back to random address
-        own_addr_type = BLE_OWN_ADDR_RANDOM;
-    }
-
-    ESP_LOGI(TAG, "Using address type: %d", own_addr_type);
+    ESP_LOGI(TAG, "NimBLE sync");
+    ble_hs_util_ensure_addr(BLE_OWN_ADDR_RANDOM);
     start_advertising();
 }
 
@@ -161,14 +129,11 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                 connected_ = true;
                 ESP_LOGI(TAG, "Connected (handle=%d)", conn_handle_);
                 ble_att_set_preferred_mtu(512);
-            } else {
-                start_advertising();
-            }
+            } else { start_advertising(); }
             break;
         case BLE_GAP_EVENT_DISCONNECT:
             ESP_LOGI(TAG, "Disconnected");
-            connected_ = false;
-            conn_handle_ = 0;
+            connected_ = false; conn_handle_ = 0;
             start_advertising();
             break;
         case BLE_GAP_EVENT_MTU:
@@ -177,89 +142,52 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         case BLE_GAP_EVENT_ADV_COMPLETE:
             start_advertising();
             break;
-        default:
-            break;
+        default: break;
     }
     return 0;
 }
 
-static void ble_host_task(void *param)
-{
-    nimble_port_run();
-    nimble_port_freertos_deinit();
-}
-
-static void on_reset(int reason)
-{
-    ESP_LOGE(TAG, "BLE host reset: %d", reason);
-}
-
-// --- Public API ---
+static void ble_host_task(void *param) { nimble_port_run(); nimble_port_freertos_deinit(); }
+static void on_reset(int reason) { ESP_LOGE(TAG, "BLE host reset: %d", reason); }
 
 void hal::ble_init()
 {
-    // Power on C6 coprocessor via IO expander
     bsp_feature_enable(BSP_FEATURE_WIFI, true);
     vTaskDelay(pdMS_TO_TICKS(200));
 
-    // Init esp_hosted transport
     ESP_LOGI(TAG, "Initializing esp_hosted...");
-    int hosted_rc = esp_hosted_init();
-    if (hosted_rc != 0) {
-        ESP_LOGE(TAG, "esp_hosted_init failed: %d", hosted_rc);
-        return;
-    }
+    esp_hosted_init();
 
-    // Connect SDIO transport to C6 and wait for it
     ESP_LOGI(TAG, "Connecting to C6 slave...");
-    hosted_rc = esp_hosted_connect_to_slave();
-    if (hosted_rc != 0) {
-        ESP_LOGE(TAG, "esp_hosted_connect_to_slave failed: %d", hosted_rc);
-        return;
-    }
-    ESP_LOGI(TAG, "C6 SDIO link up");
+    esp_hosted_connect_to_slave();
+    ESP_LOGI(TAG, "C6 SDIO link up, waiting for vHCI...");
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
-    // Wait for hosted transport + vHCI to fully initialize
-    // The C6 needs time to start its BT controller and register the vHCI transport
-    ESP_LOGI(TAG, "Waiting for vHCI...");
-    vTaskDelay(pdMS_TO_TICKS(3000));
-
-    // Init NimBLE host
     int rc = nimble_port_init();
     assert(rc == 0);
 
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
-
-    ble_svc_gap_init();
-    ble_svc_gatt_init();
-
-    rc = ble_gatts_count_cfg(svcs);
-    assert(rc == 0);
-    rc = ble_gatts_add_svcs(svcs);
-    assert(rc == 0);
-
-    ble_svc_gap_device_name_set("Tab5");
-
-    // Set store callbacks (avoids NULL pointer crash during IRK restore)
     ble_hs_cfg.store_read_cb = ble_store_config_read;
     ble_hs_cfg.store_write_cb = ble_store_config_write;
     ble_hs_cfg.store_delete_cb = ble_store_config_delete;
+
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+    rc = ble_gatts_count_cfg(svcs); assert(rc == 0);
+    rc = ble_gatts_add_svcs(svcs); assert(rc == 0);
+    ble_svc_gap_device_name_set("Tab5");
 
     nimble_port_freertos_init(ble_host_task);
     ESP_LOGI(TAG, "BLE initialized");
 }
 
-bool hal::ble_is_connected()
-{
-    return connected_;
-}
+bool hal::ble_is_connected() { return connected_; }
 
 void hal::ble_notify(const char *json)
 {
     if (!connected_) return;
-
     struct os_mbuf *om = ble_hs_mbuf_from_flat(json, strlen(json));
     if (om) {
         int rc = ble_gatts_notify_custom(conn_handle_, resp_chr_handle_, om);
@@ -267,7 +195,4 @@ void hal::ble_notify(const char *json)
     }
 }
 
-void hal::ble_set_command_handler(command_handler_t handler)
-{
-    cmd_handler_ = handler;
-}
+void hal::ble_set_command_handler(command_handler_t handler) { cmd_handler_ = handler; }
