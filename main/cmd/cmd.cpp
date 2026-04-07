@@ -1,19 +1,28 @@
 #include "cmd/cmd.h"
 #include "hal/hal.h"
+#include "bsp/m5stack_tab5.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_sleep.h"
 #include "cJSON.h"
 #include <cstdio>
 #include <cstring>
 
 static const char *TAG = "cmd";
 
+// --- Response helpers ---
+
 static void respond_ok()
 {
     hal::ble_notify("{\"ok\":true}");
+}
+
+static void respond_json(const char *json)
+{
+    hal::ble_notify(json);
 }
 
 static void respond_error(const char *msg)
@@ -29,7 +38,14 @@ static uint32_t parse_color(const char *hex, uint32_t fallback)
     return (uint32_t)strtol(hex + 1, NULL, 16);
 }
 
-// --- Command handlers ---
+static const lv_font_t *pick_font(int size)
+{
+    if (size >= 48) return &lv_font_montserrat_48;
+    if (size >= 24) return &lv_font_montserrat_24;
+    return &lv_font_montserrat_14;
+}
+
+// --- Display commands ---
 
 static void cmd_display_text(cJSON *root)
 {
@@ -39,37 +55,57 @@ static void cmd_display_text(cJSON *root)
     const char *color_str = cJSON_GetStringValue(cJSON_GetObjectItem(root, "color"));
     uint32_t color = parse_color(color_str, 0xffffff);
 
+    const char *bg_str = cJSON_GetStringValue(cJSON_GetObjectItem(root, "bg"));
+    uint32_t bg = parse_color(bg_str, 0x000000);
+
     cJSON *size_item = cJSON_GetObjectItem(root, "size");
     int size = size_item ? size_item->valueint : 24;
 
-    const lv_font_t *font = &lv_font_montserrat_24;
-    if (size >= 48) font = &lv_font_montserrat_48;
-    else if (size <= 14) font = &lv_font_montserrat_14;
+    // Position: "center" (default), "top", "bottom"
+    const char *pos = cJSON_GetStringValue(cJSON_GetObjectItem(root, "position"));
+
+    // append: if true, don't clear screen first
+    cJSON *append_item = cJSON_GetObjectItem(root, "append");
+    bool append = append_item && cJSON_IsTrue(append_item);
 
     hal::display_lock();
     lv_obj_t *scr = hal::display_root();
 
-    // Clear previous content
-    lv_obj_clean(scr);
+    if (!append) {
+        lv_obj_clean(scr);
+        lv_obj_set_style_bg_color(scr, lv_color_hex(bg), 0);
+        lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    }
 
     lv_obj_t *label = lv_label_create(scr);
     lv_label_set_text(label, text);
     lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
-    lv_obj_set_style_text_font(label, font, 0);
+    lv_obj_set_style_text_font(label, pick_font(size), 0);
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(label, lv_pct(90));
-    lv_obj_center(label);
+
+    if (pos && strcmp(pos, "top") == 0)
+        lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
+    else if (pos && strcmp(pos, "bottom") == 0)
+        lv_obj_align(label, LV_ALIGN_BOTTOM_MID, 0, -20);
+    else
+        lv_obj_center(label);
 
     hal::display_unlock();
-
     ESP_LOGI(TAG, "display.text: \"%s\"", text);
     respond_ok();
 }
 
 static void cmd_display_clear(cJSON *root)
 {
+    const char *bg_str = cJSON_GetStringValue(cJSON_GetObjectItem(root, "bg"));
+    uint32_t bg = parse_color(bg_str, 0x000000);
+
     hal::display_lock();
-    lv_obj_clean(hal::display_root());
+    lv_obj_t *scr = hal::display_root();
+    lv_obj_clean(scr);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(bg), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     hal::display_unlock();
 
     ESP_LOGI(TAG, "display.clear");
@@ -81,24 +117,93 @@ static void cmd_display_brightness(cJSON *root)
     cJSON *val = cJSON_GetObjectItem(root, "value");
     if (!val) { respond_error("missing 'value'"); return; }
 
-    int pct = val->valueint;
-    hal::display_set_brightness(pct);
-
-    ESP_LOGI(TAG, "display.brightness: %d%%", pct);
+    hal::display_set_brightness(val->valueint);
+    ESP_LOGI(TAG, "display.brightness: %d%%", val->valueint);
     respond_ok();
 }
+
+static void cmd_display_rect(cJSON *root)
+{
+    cJSON *x_item = cJSON_GetObjectItem(root, "x");
+    cJSON *y_item = cJSON_GetObjectItem(root, "y");
+    cJSON *w_item = cJSON_GetObjectItem(root, "w");
+    cJSON *h_item = cJSON_GetObjectItem(root, "h");
+    if (!w_item || !h_item) { respond_error("missing 'w' or 'h'"); return; }
+
+    int x = x_item ? x_item->valueint : 0;
+    int y = y_item ? y_item->valueint : 0;
+    int w = w_item->valueint;
+    int h = h_item->valueint;
+
+    const char *color_str = cJSON_GetStringValue(cJSON_GetObjectItem(root, "color"));
+    uint32_t color = parse_color(color_str, 0xffffff);
+
+    cJSON *radius_item = cJSON_GetObjectItem(root, "radius");
+    int radius = radius_item ? radius_item->valueint : 0;
+
+    hal::display_lock();
+    lv_obj_t *rect = lv_obj_create(hal::display_root());
+    lv_obj_remove_style_all(rect);
+    lv_obj_set_pos(rect, x, y);
+    lv_obj_set_size(rect, w, h);
+    lv_obj_set_style_bg_color(rect, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_opa(rect, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(rect, radius, 0);
+    hal::display_unlock();
+
+    ESP_LOGI(TAG, "display.rect: %dx%d at (%d,%d)", w, h, x, y);
+    respond_ok();
+}
+
+static void cmd_display_color(cJSON *root)
+{
+    const char *color_str = cJSON_GetStringValue(cJSON_GetObjectItem(root, "color"));
+    if (!color_str) { respond_error("missing 'color'"); return; }
+
+    uint32_t color = parse_color(color_str, 0x000000);
+
+    hal::display_lock();
+    lv_obj_t *scr = hal::display_root();
+    lv_obj_clean(scr);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    hal::display_unlock();
+
+    ESP_LOGI(TAG, "display.color: %s", color_str);
+    respond_ok();
+}
+
+static void cmd_display_screen_size(cJSON *root)
+{
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"width\":%d,\"height\":%d}",
+        BSP_LCD_H_RES, BSP_LCD_V_RES);
+    respond_json(buf);
+}
+
+// --- System commands ---
 
 static void cmd_system_info(cJSON *root)
 {
     int64_t uptime_s = esp_timer_get_time() / 1000000;
-    size_t heap = esp_get_free_heap_size();
+    size_t heap_free = esp_get_free_heap_size();
+    size_t heap_min = esp_get_minimum_free_heap_size();
 
-    char buf[256];
+    char buf[512];
     snprintf(buf, sizeof(buf),
-        "{\"ok\":true,\"heap\":%zu,\"uptime\":%lld,\"ble\":true}",
-        heap, (long long)uptime_s);
+        "{\"ok\":true,"
+        "\"heap_free\":%zu,"
+        "\"heap_min\":%zu,"
+        "\"uptime_s\":%lld,"
+        "\"ble_connected\":%s,"
+        "\"display\":{\"width\":%d,\"height\":%d}"
+        "}",
+        heap_free, heap_min, (long long)uptime_s,
+        hal::ble_is_connected() ? "true" : "false",
+        BSP_LCD_H_RES, BSP_LCD_V_RES);
 
-    hal::ble_notify(buf);
+    respond_json(buf);
 }
 
 static void cmd_system_reboot(cJSON *root)
@@ -106,6 +211,28 @@ static void cmd_system_reboot(cJSON *root)
     respond_ok();
     vTaskDelay(pdMS_TO_TICKS(200));
     esp_restart();
+}
+
+static void cmd_system_sleep(cJSON *root)
+{
+    cJSON *secs = cJSON_GetObjectItem(root, "seconds");
+    int sleep_s = secs ? secs->valueint : 0;
+
+    respond_ok();
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    hal::display_set_brightness(0);
+
+    if (sleep_s > 0) {
+        esp_sleep_enable_timer_wakeup((uint64_t)sleep_s * 1000000ULL);
+    }
+    // BLE wakeup not configured yet — deep sleep will require re-init
+    esp_deep_sleep_start();
+}
+
+static void cmd_system_ping(cJSON *root)
+{
+    respond_json("{\"ok\":true,\"pong\":true}");
 }
 
 // --- Dispatch ---
@@ -125,11 +252,18 @@ static void on_command(const char *json, size_t len)
         return;
     }
 
-    if (strcmp(cmd, "display.text") == 0)           cmd_display_text(root);
-    else if (strcmp(cmd, "display.clear") == 0)      cmd_display_clear(root);
+    // Display
+    if      (strcmp(cmd, "display.text") == 0)        cmd_display_text(root);
+    else if (strcmp(cmd, "display.clear") == 0)       cmd_display_clear(root);
     else if (strcmp(cmd, "display.brightness") == 0)  cmd_display_brightness(root);
+    else if (strcmp(cmd, "display.rect") == 0)        cmd_display_rect(root);
+    else if (strcmp(cmd, "display.color") == 0)       cmd_display_color(root);
+    else if (strcmp(cmd, "display.screen_size") == 0) cmd_display_screen_size(root);
+    // System
     else if (strcmp(cmd, "system.info") == 0)         cmd_system_info(root);
     else if (strcmp(cmd, "system.reboot") == 0)       cmd_system_reboot(root);
+    else if (strcmp(cmd, "system.sleep") == 0)        cmd_system_sleep(root);
+    else if (strcmp(cmd, "system.ping") == 0)         cmd_system_ping(root);
     else {
         ESP_LOGW(TAG, "Unknown command: %s", cmd);
         respond_error("unknown command");
