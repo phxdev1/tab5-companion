@@ -1,4 +1,9 @@
 idf_component_register(
-    SRCS "main.cpp" "ui_splash.cpp" "ui_launcher.cpp" "apps.cpp"
+    SRCS "main.cpp"
+         "hal/display.cpp"
+         "hal/ble.cpp"
+         "cmd/cmd.cpp"
+         "ui/standby.cpp"
     INCLUDE_DIRS "."
+    PRIV_REQUIRES nvs_flash bt json
 )
