@@ -253,13 +253,22 @@ static void cmd_audio_volume(cJSON *root)
 
 // ========== WIFI COMMANDS ==========
 
-static void cmd_wifi_scan(cJSON *root)
+static void wifi_scan_task(void *arg)
 {
     char *buf = (char *)malloc(4096);
-    if (!buf) { respond_error("no memory"); return; }
-    hal::wifi_scan_json(buf, 4096);
-    respond_json(buf);
-    free(buf);
+    if (buf) {
+        hal::wifi_scan_json(buf, 4096);
+        hal::ble_notify(buf);
+        free(buf);
+    }
+    vTaskDelete(NULL);
+}
+
+static void cmd_wifi_scan(cJSON *root)
+{
+    // Non-blocking — scan runs on separate task, result via BLE notify
+    xTaskCreate(wifi_scan_task, "wifi_scan", 4096, NULL, 3, NULL);
+    respond_json("{\"ok\":true,\"note\":\"scanning async, watch for result\"}");
 }
 
 static void cmd_wifi_connect(cJSON *root)
@@ -270,19 +279,13 @@ static void cmd_wifi_connect(cJSON *root)
     const char *password = cJSON_GetStringValue(cJSON_GetObjectItem(root, "password"));
     if (!password) password = "";
 
-    bool ok = hal::wifi_connect(ssid, password);
-    if (ok) {
-        char ip[20] = {};
-        hal::wifi_get_ip(ip, sizeof(ip));
-
-        // Start HTTP server once connected
-        hal::http_start(8080);
-
-        char buf[256];
-        snprintf(buf, sizeof(buf), "{\"ok\":true,\"ssid\":\"%s\",\"ip\":\"%s\"}", ssid, ip);
-        respond_json(buf);
+    // Non-blocking — kicks off a task, result arrives as BLE notification
+    // {event:"wifi", status:"connected"|"failed", ssid:..., ip:...}
+    bool started = hal::wifi_connect(ssid, password);
+    if (started) {
+        respond_json("{\"ok\":true,\"note\":\"connecting async, watch for wifi event\"}");
     } else {
-        respond_error("wifi connection failed");
+        respond_error("wifi not initialized");
     }
 }
 

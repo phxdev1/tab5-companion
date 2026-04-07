@@ -71,6 +71,64 @@ void hal::wifi_init()
     ESP_LOGI(TAG, "Wi-Fi initialized");
 }
 
+// --- Async connect ---
+
+struct wifi_connect_args_t {
+    char ssid[33];
+    char password[65];
+};
+
+static void wifi_connect_task(void *arg)
+{
+    wifi_connect_args_t *args = (wifi_connect_args_t *)arg;
+
+    s_retry_count = 0;
+
+    wifi_config_t wifi_cfg = {};
+    strncpy((char *)wifi_cfg.sta.ssid, args->ssid, sizeof(wifi_cfg.sta.ssid) - 1);
+    if (strlen(args->password) > 0) {
+        strncpy((char *)wifi_cfg.sta.password, args->password, sizeof(wifi_cfg.sta.password) - 1);
+        wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    }
+    wifi_cfg.sta.pmf_cfg.capable = true;
+
+    esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
+    xEventGroupClearBits(s_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+
+    ESP_LOGI(TAG, "Connecting to '%s'...", args->ssid);
+    esp_wifi_connect();
+
+    // Wait up to 15s — this blocks THIS task, not the BLE task
+    EventBits_t bits = xEventGroupWaitBits(s_event_group,
+        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE,
+        pdMS_TO_TICKS(15000));
+
+    if (bits & WIFI_CONNECTED_BIT) {
+        char ip[20] = {};
+        hal::wifi_get_ip(ip, sizeof(ip));
+
+        // Start HTTP server
+        hal::http_start(8080);
+
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+            "{\"event\":\"wifi\",\"status\":\"connected\",\"ssid\":\"%s\",\"ip\":\"%s\"}",
+            args->ssid, ip);
+        hal::ble_notify(buf);
+        ESP_LOGI(TAG, "Connected to '%s' at %s", args->ssid, ip);
+    } else {
+        char buf[128];
+        snprintf(buf, sizeof(buf),
+            "{\"event\":\"wifi\",\"status\":\"failed\",\"ssid\":\"%s\"}",
+            args->ssid);
+        hal::ble_notify(buf);
+        ESP_LOGE(TAG, "Failed to connect to '%s'", args->ssid);
+    }
+
+    free(args);
+    vTaskDelete(NULL);
+}
+
 bool hal::wifi_connect(const char *ssid, const char *password)
 {
     if (!s_initialized) {
@@ -78,34 +136,17 @@ bool hal::wifi_connect(const char *ssid, const char *password)
         return false;
     }
 
-    s_retry_count = 0;
+    // Allocate args for the task (freed inside task)
+    wifi_connect_args_t *args = (wifi_connect_args_t *)malloc(sizeof(wifi_connect_args_t));
+    if (!args) return false;
 
-    wifi_config_t wifi_cfg = {};
-    strncpy((char *)wifi_cfg.sta.ssid, ssid, sizeof(wifi_cfg.sta.ssid) - 1);
-    if (password && strlen(password) > 0) {
-        strncpy((char *)wifi_cfg.sta.password, password, sizeof(wifi_cfg.sta.password) - 1);
-        wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-    }
-    wifi_cfg.sta.pmf_cfg.capable = true;
+    memset(args, 0, sizeof(*args));
+    strncpy(args->ssid, ssid, sizeof(args->ssid) - 1);
+    if (password) strncpy(args->password, password, sizeof(args->password) - 1);
 
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
-
-    xEventGroupClearBits(s_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
-    ESP_LOGI(TAG, "Connecting to '%s'...", ssid);
-    esp_wifi_connect();
-
-    // Wait up to 15s
-    EventBits_t bits = xEventGroupWaitBits(s_event_group,
-        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE,
-        pdMS_TO_TICKS(15000));
-
-    if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "Connected to '%s'", ssid);
-        return true;
-    }
-
-    ESP_LOGE(TAG, "Failed to connect to '%s'", ssid);
-    return false;
+    // Launch connection on a separate task so BLE isn't blocked
+    xTaskCreate(wifi_connect_task, "wifi_conn", 4096, args, 3, NULL);
+    return true;  // Returns immediately; result comes via BLE notify
 }
 
 bool hal::wifi_is_connected()
