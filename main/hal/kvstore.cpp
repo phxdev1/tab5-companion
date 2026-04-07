@@ -189,16 +189,18 @@ int events::read_json(char *buf, size_t len, int limit)
     xSemaphoreTake(event_mutex_, portMAX_DELAY);
 
     int to_read = event_count_ < (size_t)limit ? (int)event_count_ : limit;
+    int remaining = (int)event_count_ - to_read;
 
     // Calculate start position (oldest unread)
     size_t start;
     if (event_count_ >= event_cap_) {
-        start = event_head_; // ring is full, oldest is at head
+        start = event_head_;
     } else {
         start = (event_head_ + event_cap_ - event_count_) % event_cap_;
     }
 
-    int pos = snprintf(buf, len, "{\"ok\":true,\"count\":%d,\"events\":[", to_read);
+    int pos = snprintf(buf, len, "{\"ok\":true,\"count\":%d,\"remaining\":%d,\"events\":[",
+                       to_read, remaining);
 
     for (int i = 0; i < to_read && pos < (int)len - 20; i++) {
         size_t idx = (start + i) % event_cap_;
@@ -209,16 +211,15 @@ int events::read_json(char *buf, size_t len, int limit)
 
     snprintf(buf + pos, len - pos, "]}");
 
-    // Drain — free all read events
-    for (size_t i = 0; i < event_count_; i++) {
+    // Drain only what we returned — leave the rest
+    for (int i = 0; i < to_read; i++) {
         size_t idx = (start + i) % event_cap_;
         if (event_buf_[idx].json) {
             free(event_buf_[idx].json);
             event_buf_[idx].json = nullptr;
         }
     }
-    event_count_ = 0;
-    event_head_ = 0;
+    event_count_ -= to_read;
 
     xSemaphoreGive(event_mutex_);
     return to_read;
