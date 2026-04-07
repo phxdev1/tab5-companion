@@ -368,10 +368,11 @@ static void cmd_kv_list(cJSON *root)
 static void cmd_events_read(cJSON *root)
 {
     cJSON *limit_item = cJSON_GetObjectItem(root, "limit");
-    int limit = limit_item ? limit_item->valueint : 5; // Default 5 to fit in BLE MTU
-    if (limit > 50) limit = 50;
-    // ~100 bytes per event, leave room for framing
-    size_t buf_size = (size_t)limit * 120 + 64;
+    int limit = limit_item ? limit_item->valueint : 3; // Default 3 — fits in any BLE MTU
+    if (limit < 1) limit = 1;
+    if (limit > 20) limit = 20;
+
+    size_t buf_size = (size_t)limit * 120 + 80;
     char *buf = (char *)malloc(buf_size);
     if (!buf) { respond_error("no memory"); return; }
     events::read_json(buf, buf_size, limit);
