@@ -396,8 +396,8 @@ static void cmd_events_ack(cJSON *root)
 
 static void cmd_events_count(cJSON *root)
 {
-    char buf[128];
-    snprintf(buf, sizeof(buf), "{\"ok\":true,\"count\":%d,\"note\":\"use events.read to drain\"}", events::count());
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"ok\":true,\"count\":%d}", events::count());
     respond_json(buf);
 }
 
