@@ -1,5 +1,4 @@
 // BLE GATT server for Tab5 — NimBLE via esp_hosted C6 coprocessor
-// Wraps NimBLE C API in extern "C" blocks to avoid C++ issues
 
 #include "hal/hal.h"
 #include "bsp/m5stack_tab5.h"
@@ -10,6 +9,8 @@
 #include <cstdlib>
 
 extern "C" {
+#include "esp_hosted.h"
+#include "esp_hosted_misc.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
@@ -17,6 +18,7 @@ extern "C" {
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "store/config/ble_store_config.h"
 }
 
 static const char *TAG = "hal:ble";
@@ -31,13 +33,11 @@ static bool connected_ = false;
 static uint16_t resp_chr_handle_ = 0;
 static hal::command_handler_t cmd_handler_ = nullptr;
 
-// Static UUID storage (avoids C++ rvalue issues with BLE_UUID16_DECLARE)
 static ble_uuid16_t svc_uuid   = BLE_UUID16_INIT(SVC_UUID);
 static ble_uuid16_t cmd_uuid   = BLE_UUID16_INIT(CHR_CMD_UUID);
 static ble_uuid16_t resp_uuid  = BLE_UUID16_INIT(CHR_RESP_UUID);
 static ble_uuid16_t stat_uuid  = BLE_UUID16_INIT(CHR_STATUS_UUID);
 
-// Forward declarations
 static int gap_event(struct ble_gap_event *event, void *arg);
 
 extern "C" {
@@ -45,9 +45,7 @@ extern "C" {
 static int cmd_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                           struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
-        return BLE_ATT_ERR_UNLIKELY;
-    }
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
 
     uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
     if (len == 0 || len > 4096) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
@@ -83,48 +81,18 @@ static int status_chr_access(uint16_t conn_handle, uint16_t attr_handle,
 
 } // extern "C"
 
-// GATT service — defined as C-compatible structs
 static struct ble_gatt_chr_def chrs[] = {
-    {   // Command (write)
-        .uuid = &cmd_uuid.u,
-        .access_cb = cmd_chr_access,
-        .arg = NULL,
-        .descriptors = NULL,
-        .flags = BLE_GATT_CHR_F_WRITE,
-        .min_key_size = 0,
-        .val_handle = NULL,
-        .cpfd = NULL,
-    },
-    {   // Response (notify)
-        .uuid = &resp_uuid.u,
-        .access_cb = resp_chr_access,
-        .arg = NULL,
-        .descriptors = NULL,
-        .flags = BLE_GATT_CHR_F_NOTIFY,
-        .min_key_size = 0,
-        .val_handle = &resp_chr_handle_,
-        .cpfd = NULL,
-    },
-    {   // Status (read)
-        .uuid = &stat_uuid.u,
-        .access_cb = status_chr_access,
-        .arg = NULL,
-        .descriptors = NULL,
-        .flags = BLE_GATT_CHR_F_READ,
-        .min_key_size = 0,
-        .val_handle = NULL,
-        .cpfd = NULL,
-    },
-    { 0 }, // terminator
+    { .uuid = &cmd_uuid.u, .access_cb = cmd_chr_access, .arg = NULL, .descriptors = NULL,
+      .flags = BLE_GATT_CHR_F_WRITE, .min_key_size = 0, .val_handle = NULL, .cpfd = NULL },
+    { .uuid = &resp_uuid.u, .access_cb = resp_chr_access, .arg = NULL, .descriptors = NULL,
+      .flags = BLE_GATT_CHR_F_NOTIFY, .min_key_size = 0, .val_handle = &resp_chr_handle_, .cpfd = NULL },
+    { .uuid = &stat_uuid.u, .access_cb = status_chr_access, .arg = NULL, .descriptors = NULL,
+      .flags = BLE_GATT_CHR_F_READ, .min_key_size = 0, .val_handle = NULL, .cpfd = NULL },
+    { 0 },
 };
 
 static struct ble_gatt_svc_def svcs[] = {
-    {
-        .type = BLE_GATT_SVC_TYPE_PRIMARY,
-        .uuid = &svc_uuid.u,
-        .includes = NULL,
-        .characteristics = chrs,
-    },
+    { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &svc_uuid.u, .includes = NULL, .characteristics = chrs },
     { 0 },
 };
 
@@ -152,9 +120,36 @@ static void start_advertising(void)
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
 
-    ESP_LOGI(TAG, "Advertising as '%s'", name);
-    ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
+    uint8_t own_addr_type;
+    ble_hs_id_infer_auto(0, &own_addr_type);
+
+    ESP_LOGI(TAG, "Advertising as '%s' (addr_type=%d)", name, own_addr_type);
+    ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER,
                       &adv_params, gap_event, NULL);
+}
+
+static void on_sync(void)
+{
+    ESP_LOGI(TAG, "NimBLE sync — configuring address...");
+
+    // Generate a random static address if no public address available
+    int rc = ble_hs_util_ensure_addr(BLE_OWN_ADDR_RANDOM);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_hs_util_ensure_addr failed: %d", rc);
+        return;
+    }
+
+    // Use random address for advertising
+    uint8_t own_addr_type;
+    rc = ble_hs_id_infer_auto(0, &own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_hs_id_infer_auto failed: %d", rc);
+        // Fall back to random address
+        own_addr_type = BLE_OWN_ADDR_RANDOM;
+    }
+
+    ESP_LOGI(TAG, "Using address type: %d", own_addr_type);
+    start_advertising();
 }
 
 static int gap_event(struct ble_gap_event *event, void *arg)
@@ -194,12 +189,6 @@ static void ble_host_task(void *param)
     nimble_port_freertos_deinit();
 }
 
-static void on_sync(void)
-{
-    ble_hs_id_infer_auto(0, NULL);
-    start_advertising();
-}
-
 static void on_reset(int reason)
 {
     ESP_LOGE(TAG, "BLE host reset: %d", reason);
@@ -209,15 +198,39 @@ static void on_reset(int reason)
 
 void hal::ble_init()
 {
-    // Power on C6 coprocessor
+    // Power on C6 coprocessor via IO expander
     bsp_feature_enable(BSP_FEATURE_WIFI, true);
     vTaskDelay(pdMS_TO_TICKS(200));
 
+    // Init esp_hosted transport
+    ESP_LOGI(TAG, "Initializing esp_hosted...");
+    int hosted_rc = esp_hosted_init();
+    if (hosted_rc != 0) {
+        ESP_LOGE(TAG, "esp_hosted_init failed: %d", hosted_rc);
+        return;
+    }
+
+    // Connect SDIO transport to C6 and wait for it
+    ESP_LOGI(TAG, "Connecting to C6 slave...");
+    hosted_rc = esp_hosted_connect_to_slave();
+    if (hosted_rc != 0) {
+        ESP_LOGE(TAG, "esp_hosted_connect_to_slave failed: %d", hosted_rc);
+        return;
+    }
+    ESP_LOGI(TAG, "C6 SDIO link up");
+
+    // Wait for hosted transport + vHCI to fully initialize
+    // The C6 needs time to start its BT controller and register the vHCI transport
+    ESP_LOGI(TAG, "Waiting for vHCI...");
+    vTaskDelay(pdMS_TO_TICKS(3000));
+
+    // Init NimBLE host
     int rc = nimble_port_init();
     assert(rc == 0);
 
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
+    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
     ble_svc_gap_init();
     ble_svc_gatt_init();
@@ -228,6 +241,11 @@ void hal::ble_init()
     assert(rc == 0);
 
     ble_svc_gap_device_name_set("Tab5");
+
+    // Set store callbacks (avoids NULL pointer crash during IRK restore)
+    ble_hs_cfg.store_read_cb = ble_store_config_read;
+    ble_hs_cfg.store_write_cb = ble_store_config_write;
+    ble_hs_cfg.store_delete_cb = ble_store_config_delete;
 
     nimble_port_freertos_init(ble_host_task);
     ESP_LOGI(TAG, "BLE initialized");

@@ -4,11 +4,19 @@
 #include "cmd/cmd.h"
 #include "ui/ui.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
 
 static const char *TAG = "main";
 
 extern "C" void app_main(void)
 {
+    // NVS — required for NimBLE key storage
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        nvs_flash_init();
+    }
+
     // Display — backlight stays off until we're ready
     hal::display_init();
 
