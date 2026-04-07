@@ -386,6 +386,14 @@ static void cmd_events_clear(cJSON *root)
     respond_ok();
 }
 
+static void cmd_events_ack(cJSON *root)
+{
+    cJSON *count_item = cJSON_GetObjectItem(root, "count");
+    if (!count_item) { respond_error("missing 'count'"); return; }
+    events::ack(count_item->valueint);
+    respond_ok();
+}
+
 static void cmd_events_count(cJSON *root)
 {
     char buf[128];
@@ -479,6 +487,7 @@ static void on_command(const char *json, size_t len)
     else if (strcmp(cmd, "kv.list") == 0)               cmd_kv_list(root);
     // Events
     else if (strcmp(cmd, "events.read") == 0)           cmd_events_read(root);
+    else if (strcmp(cmd, "events.ack") == 0)            cmd_events_ack(root);
     else if (strcmp(cmd, "events.clear") == 0)          cmd_events_clear(root);
     else if (strcmp(cmd, "events.count") == 0)          cmd_events_count(root);
     // System

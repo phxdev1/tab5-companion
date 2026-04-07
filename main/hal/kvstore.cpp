@@ -211,18 +211,35 @@ int events::read_json(char *buf, size_t len, int limit)
 
     snprintf(buf + pos, len - pos, "]}");
 
-    // Drain only what we returned — leave the rest
-    for (int i = 0; i < to_read; i++) {
+    // Non-destructive — events stay until ack'd
+
+    xSemaphoreGive(event_mutex_);
+    return to_read;
+}
+
+void events::ack(int count)
+{
+    xSemaphoreTake(event_mutex_, portMAX_DELAY);
+
+    int to_ack = (int)event_count_ < count ? (int)event_count_ : count;
+
+    size_t start;
+    if (event_count_ >= event_cap_) {
+        start = event_head_;
+    } else {
+        start = (event_head_ + event_cap_ - event_count_) % event_cap_;
+    }
+
+    for (int i = 0; i < to_ack; i++) {
         size_t idx = (start + i) % event_cap_;
         if (event_buf_[idx].json) {
             free(event_buf_[idx].json);
             event_buf_[idx].json = nullptr;
         }
     }
-    event_count_ -= to_read;
+    event_count_ -= to_ack;
 
     xSemaphoreGive(event_mutex_);
-    return to_read;
 }
 
 void events::clear()

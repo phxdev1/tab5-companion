@@ -30,8 +30,11 @@ void init(size_t capacity = 256);
 // Push an event (JSON string). Oldest dropped if full.
 void push(const char *json);
 
-// Read and drain up to limit events. Returns JSON array.
-int read_json(char *buf, size_t len, int limit = 64);
+// Peek at up to limit events (non-destructive). Returns JSON array.
+int read_json(char *buf, size_t len, int limit = 3);
+
+// Acknowledge N events — advances read pointer, frees them.
+void ack(int count);
 
 // Clear all events
 void clear();
