@@ -33,4 +33,17 @@ void audio_init();
 void audio_tone(int freq_hz, int duration_ms);
 void audio_set_volume(int pct);
 
+// --- Wi-Fi ---
+void wifi_init();
+bool wifi_connect(const char *ssid, const char *password);
+bool wifi_is_connected();
+void wifi_get_ip(char *buf, size_t len);
+int wifi_get_rssi();
+int wifi_scan_json(char *buf, size_t len); // Returns JSON array of APs
+
+// --- HTTP Server ---
+void http_start(uint16_t port = 8080);
+void http_stop();
+
 }
+

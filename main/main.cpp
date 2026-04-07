@@ -36,6 +36,9 @@ extern "C" void app_main(void)
     // BLE — power C6, init NimBLE, start advertising
     hal::ble_init();
 
+    // Wi-Fi — init stack (connect later via command)
+    hal::wifi_init();
+
     // Command dispatch — wires BLE commands to handlers
     cmd::init();
 

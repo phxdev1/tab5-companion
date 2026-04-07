@@ -251,6 +251,61 @@ static void cmd_audio_volume(cJSON *root)
     respond_ok();
 }
 
+// ========== WIFI COMMANDS ==========
+
+static void cmd_wifi_scan(cJSON *root)
+{
+    char *buf = (char *)malloc(4096);
+    if (!buf) { respond_error("no memory"); return; }
+    hal::wifi_scan_json(buf, 4096);
+    respond_json(buf);
+    free(buf);
+}
+
+static void cmd_wifi_connect(cJSON *root)
+{
+    const char *ssid = cJSON_GetStringValue(cJSON_GetObjectItem(root, "ssid"));
+    if (!ssid) { respond_error("missing 'ssid'"); return; }
+
+    const char *password = cJSON_GetStringValue(cJSON_GetObjectItem(root, "password"));
+    if (!password) password = "";
+
+    bool ok = hal::wifi_connect(ssid, password);
+    if (ok) {
+        char ip[20] = {};
+        hal::wifi_get_ip(ip, sizeof(ip));
+
+        // Start HTTP server once connected
+        hal::http_start(8080);
+
+        char buf[256];
+        snprintf(buf, sizeof(buf), "{\"ok\":true,\"ssid\":\"%s\",\"ip\":\"%s\"}", ssid, ip);
+        respond_json(buf);
+    } else {
+        respond_error("wifi connection failed");
+    }
+}
+
+static void cmd_wifi_status(cJSON *root)
+{
+    char ip[20] = {};
+    hal::wifi_get_ip(ip, sizeof(ip));
+    int rssi = hal::wifi_get_rssi();
+
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"connected\":%s,\"ip\":\"%s\",\"rssi\":%d}",
+        hal::wifi_is_connected() ? "true" : "false", ip, rssi);
+    respond_json(buf);
+}
+
+static void cmd_wifi_disconnect(cJSON *root)
+{
+    hal::http_stop();
+    // esp_wifi_disconnect handled internally
+    respond_ok();
+}
+
 // ========== SYSTEM COMMANDS ==========
 
 static void cmd_system_info(cJSON *root)
@@ -325,6 +380,11 @@ static void on_command(const char *json, size_t len)
     // Audio
     else if (strcmp(cmd, "audio.tone") == 0)           cmd_audio_tone(root);
     else if (strcmp(cmd, "audio.volume") == 0)         cmd_audio_volume(root);
+    // Wi-Fi
+    else if (strcmp(cmd, "wifi.scan") == 0)             cmd_wifi_scan(root);
+    else if (strcmp(cmd, "wifi.connect") == 0)          cmd_wifi_connect(root);
+    else if (strcmp(cmd, "wifi.status") == 0)           cmd_wifi_status(root);
+    else if (strcmp(cmd, "wifi.disconnect") == 0)       cmd_wifi_disconnect(root);
     // System
     else if (strcmp(cmd, "system.info") == 0)          cmd_system_info(root);
     else if (strcmp(cmd, "system.reboot") == 0)        cmd_system_reboot(root);
