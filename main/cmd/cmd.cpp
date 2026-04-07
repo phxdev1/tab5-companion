@@ -1,5 +1,6 @@
 #include "cmd/cmd.h"
 #include "hal/hal.h"
+#include "hal/kvstore.h"
 #include "bsp/m5stack_tab5.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -212,9 +213,14 @@ static void on_touch_event(int x, int y, int type)
     const char *types[] = {"press", "release", "move"};
     char buf[128];
     snprintf(buf, sizeof(buf),
-        "{\"event\":\"touch\",\"x\":%d,\"y\":%d,\"type\":\"%s\"}",
-        x, y, types[type]);
-    hal::ble_notify(buf);
+        "{\"type\":\"touch\",\"x\":%d,\"y\":%d,\"action\":\"%s\",\"t\":%lld}",
+        x, y, types[type], (long long)(esp_timer_get_time() / 1000));
+    events::push(buf);
+
+    // Also update KV with last touch state
+    char kv_buf[64];
+    snprintf(kv_buf, sizeof(kv_buf), "{\"x\":%d,\"y\":%d,\"action\":\"%s\"}", x, y, types[type]);
+    kv::set("touch.last", kv_buf, 30); // expires in 30s
 }
 
 static void cmd_touch_enable(cJSON *root)
@@ -309,6 +315,76 @@ static void cmd_wifi_disconnect(cJSON *root)
     respond_ok();
 }
 
+// ========== KV COMMANDS ==========
+
+static void cmd_kv_get(cJSON *root)
+{
+    const char *key = cJSON_GetStringValue(cJSON_GetObjectItem(root, "key"));
+    if (!key) { respond_error("missing 'key'"); return; }
+    char *buf = (char *)malloc(2048);
+    if (!buf) { respond_error("no memory"); return; }
+    kv::get_json(key, buf, 2048);
+    respond_json(buf);
+    free(buf);
+}
+
+static void cmd_kv_set(cJSON *root)
+{
+    const char *key = cJSON_GetStringValue(cJSON_GetObjectItem(root, "key"));
+    if (!key) { respond_error("missing 'key'"); return; }
+    cJSON *val = cJSON_GetObjectItem(root, "value");
+    if (!val) { respond_error("missing 'value'"); return; }
+    char *val_str = cJSON_PrintUnformatted(val);
+    cJSON *ttl_item = cJSON_GetObjectItem(root, "ttl");
+    uint32_t ttl = ttl_item ? (uint32_t)ttl_item->valueint : 0;
+    kv::set(key, val_str, ttl);
+    free(val_str);
+    respond_ok();
+}
+
+static void cmd_kv_delete(cJSON *root)
+{
+    const char *key = cJSON_GetStringValue(cJSON_GetObjectItem(root, "key"));
+    if (!key) { respond_error("missing 'key'"); return; }
+    kv::del(key);
+    respond_ok();
+}
+
+static void cmd_kv_list(cJSON *root)
+{
+    char *buf = (char *)malloc(4096);
+    if (!buf) { respond_error("no memory"); return; }
+    kv::list_json(buf, 4096);
+    respond_json(buf);
+    free(buf);
+}
+
+// ========== EVENT COMMANDS ==========
+
+static void cmd_events_read(cJSON *root)
+{
+    cJSON *limit_item = cJSON_GetObjectItem(root, "limit");
+    int limit = limit_item ? limit_item->valueint : 64;
+    char *buf = (char *)malloc(8192);
+    if (!buf) { respond_error("no memory"); return; }
+    events::read_json(buf, 8192, limit);
+    respond_json(buf);
+    free(buf);
+}
+
+static void cmd_events_clear(cJSON *root)
+{
+    events::clear();
+    respond_ok();
+}
+
+static void cmd_events_count(cJSON *root)
+{
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"ok\":true,\"count\":%d}", events::count());
+    respond_json(buf);
+}
+
 // ========== SYSTEM COMMANDS ==========
 
 static void cmd_system_info(cJSON *root)
@@ -388,6 +464,15 @@ static void on_command(const char *json, size_t len)
     else if (strcmp(cmd, "wifi.connect") == 0)          cmd_wifi_connect(root);
     else if (strcmp(cmd, "wifi.status") == 0)           cmd_wifi_status(root);
     else if (strcmp(cmd, "wifi.disconnect") == 0)       cmd_wifi_disconnect(root);
+    // KV Store
+    else if (strcmp(cmd, "kv.get") == 0)                cmd_kv_get(root);
+    else if (strcmp(cmd, "kv.set") == 0)                cmd_kv_set(root);
+    else if (strcmp(cmd, "kv.delete") == 0)             cmd_kv_delete(root);
+    else if (strcmp(cmd, "kv.list") == 0)               cmd_kv_list(root);
+    // Events
+    else if (strcmp(cmd, "events.read") == 0)           cmd_events_read(root);
+    else if (strcmp(cmd, "events.clear") == 0)          cmd_events_clear(root);
+    else if (strcmp(cmd, "events.count") == 0)          cmd_events_count(root);
     // System
     else if (strcmp(cmd, "system.info") == 0)          cmd_system_info(root);
     else if (strcmp(cmd, "system.reboot") == 0)        cmd_system_reboot(root);

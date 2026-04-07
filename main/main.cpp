@@ -1,6 +1,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include "hal/hal.h"
+#include "hal/kvstore.h"
 #include "cmd/cmd.h"
 #include "ui/ui.h"
 #include "esp_log.h"
@@ -26,6 +27,10 @@ extern "C" void app_main(void)
     // Backlight on low
     vTaskDelay(pdMS_TO_TICKS(100));
     hal::display_set_brightness(20);
+
+    // KV store + event queue
+    kv::init();
+    events::init(256);
 
     // Touch
     hal::touch_init();
