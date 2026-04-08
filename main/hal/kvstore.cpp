@@ -188,30 +188,24 @@ int events::read_json(char *buf, size_t len, int limit)
 {
     xSemaphoreTake(event_mutex_, portMAX_DELAY);
 
-    int to_read = event_count_ < (size_t)limit ? (int)event_count_ : limit;
-    int remaining = (int)event_count_ - to_read;
+    int total = (int)event_count_;
+    int to_read = total < limit ? total : limit;
 
-    // Calculate start position (oldest unread)
-    size_t start;
-    if (event_count_ >= event_cap_) {
-        start = event_head_;
-    } else {
-        start = (event_head_ + event_cap_ - event_count_) % event_cap_;
-    }
-
-    int pos = snprintf(buf, len, "{\"ok\":true,\"count\":%d,\"remaining\":%d,\"events\":[",
-                       to_read, remaining);
+    // Read the NEWEST to_read events (end of the buffer)
+    // Start from (head - to_read), not from the oldest
+    int pos = snprintf(buf, len, "{\"ok\":true,\"count\":%d,\"total\":%d,\"events\":[",
+                       to_read, total);
 
     for (int i = 0; i < to_read && pos < (int)len - 20; i++) {
-        size_t idx = (start + i) % event_cap_;
+        // Walk backwards from head: newest first, then reverse for chronological order
+        // Index of the (to_read - 1 - i)th newest = head - to_read + i
+        size_t idx = (event_head_ + event_cap_ - to_read + i) % event_cap_;
         if (!event_buf_[idx].json) continue;
         if (i > 0) pos += snprintf(buf + pos, len - pos, ",");
         pos += snprintf(buf + pos, len - pos, "%s", event_buf_[idx].json);
     }
 
     snprintf(buf + pos, len - pos, "]}");
-
-    // Non-destructive — events stay until ack'd
 
     xSemaphoreGive(event_mutex_);
     return to_read;
@@ -221,11 +215,12 @@ void events::ack(int count)
 {
     xSemaphoreTake(event_mutex_, portMAX_DELAY);
 
+    // Ack drains the oldest N events
     int to_ack = (int)event_count_ < count ? (int)event_count_ : count;
 
     size_t start;
     if (event_count_ >= event_cap_) {
-        start = event_head_;
+        start = event_head_; // ring full — oldest is at head
     } else {
         start = (event_head_ + event_cap_ - event_count_) % event_cap_;
     }
